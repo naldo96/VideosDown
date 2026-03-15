@@ -1,94 +1,150 @@
 #!/bin/bash
-# 🚀 BOT TIKTOK 24/7 HOSTINGER VPS - 1 CLIC COMPLETO
-# Copia TODO → Browser Terminal → Enter
+# =====================================================
+# BOT TIKTOK TELEGRAM 24/7 - HOSTINGER VPS DEBIAN
+# GitHub: naldo96/VideosDown - 2026
+# =====================================================
 
-echo "🔧 Instalando dependencias..."
-apt update -y >/dev/null 2>&1
-apt install python3 python3-pip curl -y >/dev/null 2>&1
+echo "🚀 Iniciando instalación automática..."
 
-echo "📦 Instalando librerías Python..."
-pip3 install pyTelegramBotAPI yt-dlp --break-system-packages --quiet >/dev/null 2>&1
+# 1. UPDATE + PYTHON
+apt update -y 2>/dev/null
+apt install -y python3 python3-pip curl unzip 2>/dev/null
 
-echo "🐍 Creando bot.py..."
+# 2. LIBRERÍAS PYTHON
+pip3 install --break-system-packages pyTelegramBotAPI yt-dlp requests --quiet
+
+# 3. BOT PRINCIPAL /root/bot.py
 cat > /root/bot.py << 'EOF'
+#!/usr/bin/env python3
 import telebot
 import yt_dlp
 import re
 import os
 import logging
-logging.basicConfig(level=logging.INFO)
+from telebot.types import Message
+
+# CONFIG
 BOT_TOKEN = "8130330805:AAHebma9WyWokLBFnTGfUj9ECW84roBtN00"
-CHAT_ID = 501203904
+AUTHORIZED_CHAT = 501203904
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+
 bot = telebot.TeleBot(BOT_TOKEN)
-@bot.message_handler(commands=['start'])
-def start(message):
-    if message.chat.id != CHAT_ID: return
-    bot.reply_to(message, "🟢 VPS Bot TikTok 24/7 ✅")
-@bot.message_handler(func=lambda m: True)
-def download_tiktok(message):
-    if message.chat.id != CHAT_ID: return
+
+@bot.message_handler(commands=['start', '/start'])
+def start_handler(message: Message):
+    if message.chat.id != AUTHORIZED_CHAT:
+        return
+    bot.reply_to(message, 
+        "🟢 *Bot TikTok VPS 24/7*\n"
+        "🔗 Envía cualquier enlace:\n"
+        "• `vt.tiktok.com/...`\n"
+        "• `www.tiktok.com/...`\n"
+        "• `ZSuaymPRJ`\n\n"
+        "💾 Listo para descargar!", 
+        parse_mode='Markdown')
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message: Message):
+    if message.chat.id != AUTHORIZED_CHAT:
+        return
+    
     text = message.text or ""
-    # Regex para TODOS los TikTok
-    match = re.search(r'https?://(?:vt|vm|www)?\.?tiktok\.com/[^\s]+|Z[A-Za-z0-9]{5,}', text, re.IGNORECASE)
-    if match:
-        url = match.group(0)
-        bot.reply_to(message, "⏳ Descargando...")
+    
+    # Regex TikTok COMPLETO
+    tiktok_url = re.search(
+        r'https?://(?:vt|vm|www)?\.?(?:tiktok\.com)/[^\s]+|Z[A-Za-z0-9]{5,}',
+        text, re.IGNORECASE
+    )
+    
+    if tiktok_url:
+        url = tiktok_url.group(0)
+        bot.reply_to(message, "⏳ *Descargando video...*")
+        
         try:
+            # YT-DLP optimizado TikTok
             ydl_opts = {
-                'format': 'best[height<=1080]',
-                'outtmpl': '/tmp/tiktok.%(ext)s',
-                'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'
+                'format': 'best[height<=1080]/best',
+                'outtmpl': '/tmp/%(uploader_id)s.%(ext)s',
+                'merge_output_format': 'mp4',
+                'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)',
             }
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-            # Envía video
-            archivo = '/tmp/tiktok.mp4' if os.path.exists('/tmp/tiktok.mp4') else '/tmp/tiktok.webm'
-            if os.path.exists(archivo):
-                caption = f"🎥 {info.get('title', 'TikTok')[:60]}"
-                with open(archivo, 'rb') as f:
-                    bot.send_video(message.chat.id, f, caption=caption)
+            
+            # Busca archivo MP4
+            archivos = [f for f in os.listdir('/tmp') if f.startswith(info.get('uploader_id', ''))]
+            if archivos:
+                archivo = '/tmp/' + archivos[0]
+                caption = f"🎥 *{info.get('title', 'TikTok Video')}*\n"
+                caption += f"👤 @{info.get('uploader', 'Usuario')}\n"
+                caption += f"⏱️ {info.get('duration', 0)//60}:{info.get('duration', 0)%60:02d}s"
+                
+                with open(archivo, 'rb') as video_file:
+                    bot.send_video(
+                        message.chat.id, 
+                        video_file, 
+                        caption=caption,
+                        parse_mode='Markdown'
+                    )
                 os.remove(archivo)
-                bot.reply_to(message, "💾 ¡Descargado!")
+                bot.reply_to(message, "💾 *¡Video descargado sin watermark!* 📱")
             else:
-                bot.reply_to(message, "❌ No se encontró video")
+                bot.reply_to(message, "❌ No se pudo procesar el video")
+                
         except Exception as e:
-            bot.reply_to(message, f"⚠️ Error: {str(e)[:50]}")
+            logging.error(f"Error descargando {url}: {e}")
+            bot.reply_to(message, f"⚠️ *Error técnico*\n```{str(e)[:100]}```", parse_mode='Markdown')
     else:
-        bot.reply_to(message, "🔗 Envía enlace TikTok (vt.tiktok.com OK)")
-print("🚀 Bot iniciado - VPS Hostinger")
-bot.polling(none_stop=True)
+        bot.reply_to(message, "🔗 *Envía enlace de TikTok*\n\n`vt.tiktok.com/ABC123` funciona perfecto", parse_mode='Markdown')
+
+if __name__ == '__main__':
+    print("🚀 Bot TikTok iniciado en VPS Hostinger")
+    print("👤 Chat autorizado:", AUTHORIZED_CHAT)
+    bot.polling(none_stop=True)
 EOF
 
-echo "⚙️ Configurando systemd 24/7..."
+# 4. SYSTEMD SERVICE 24/7
 cat > /etc/systemd/system/tiktokbot.service << 'EOF'
 [Unit]
-Description=TikTok Telegram Bot
+Description=TikTok Telegram Bot - VPS Hostinger
 After=network.target
+Wants=network-online.target
+
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root
 ExecStart=/usr/bin/python3 /root/bot.py
 Restart=always
-RestartSec=10
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Inicia servicio
+# 5. ACTIVAR + START
 systemctl daemon-reload
 systemctl enable tiktokbot
 systemctl restart tiktokbot
 
-echo "✅ ==================================="
-echo "✅ BOT INSTALADO 24/7 - HOSTINGER VPS"
-echo "✅ Repo Git: https://github.com/naldo96/VideosDown.git"
-echo "✅ ==================================="
+# 6. STATUS FINAL
 echo ""
-echo "📊 Status:"
+echo "🎉 =============================================="
+echo "🎉 BOT TIKTOK 24/7 INSTALADO CORRECTAMENTE"
+echo "🎉 Repo: https://github.com/naldo96/VideosDown.git"
+echo "🎉 =============================================="
+echo ""
+echo "📊 SERVICIO:"
 systemctl status tiktokbot --no-pager -l
 echo ""
-echo "📱 Prueba: Envía https://vt.tiktok.com/ZSuaymPRJ/ al bot"
-echo "🔍 Logs: journalctl -u tiktokbot -f"
-echo "🛑 Parar: systemctl stop tiktokbot"
-echo "✅ ==================================="
+echo "📱 PROBAR:"
+echo "1. Telegram → @tu_bot_username → /start"
+echo "2. Envía: https://vt.tiktok.com/ZSuaymPRJ/"
+echo ""
+echo "🔍 LOGS VIVO: journalctl -u tiktokbot -f"
+echo "🛑 PARAR: systemctl stop tiktokbot"
+echo "🔄 REINICIAR: systemctl restart tiktokbot"
+echo "🎉 =============================================="
