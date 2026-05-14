@@ -1,0 +1,24 @@
+services:
+  videobot:
+    build: .
+    container_name: videobot
+    restart: unless-stopped
+
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+
+    # ── Solo persiste el archivo de usuarios ──────────────────
+    volumes:
+      - ./data:/app/data          # usuarios.json (control de acceso)
+
+    # ── /tmp en RAM: descargas NUNCA tocan el disco del VPS ───
+    tmpfs:
+      - /tmp:size=2G,mode=1777
+
+    # ── Logs ──────────────────────────────────────────────────
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
