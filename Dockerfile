@@ -6,9 +6,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TMPDIR=/tmp \
     BGUTIL_BASE_URL=http://bgutil-provider:4416
 
-# ffmpeg: merge audio+video (yt-dlp)
+# ffmpeg + libs para curl_cffi (TLS impersonate TikTok/YouTube)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates \
+        curl \
+        libcurl4 \
+        libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
