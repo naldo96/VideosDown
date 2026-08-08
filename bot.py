@@ -6,8 +6,9 @@ archivo guardado en el VPS.
 Autónomo: NO depende de cookies ni sesiones de navegador.
 Estrategia:
 - YouTube: clientes android / ios / tv + PO Token (bgutil-provider).
-- TikTok / resto: yt-dlp con headers de app móvil y reintentos.
-- Cascada de estrategias: si una falla, prueba la siguiente.
+- TikTok: yt-dlp con impersonate (curl_cffi) + API móvil + fallback TikWM.
+- Resto: headers móviles y reintentos.
+- Cascada: si una falla, prueba la siguiente.
 
 Aprobación de usuarios en MongoDB (solo admin aprueba).
 Descargas en tmp efímero + tmpfs → nada queda en disco del VPS.
@@ -16,12 +17,16 @@ Descargas en tmp efímero + tmpfs → nada queda en disco del VPS.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
@@ -49,6 +54,8 @@ TMP_PREFIX = "tgbot_"
 BGUTIL_BASE_URL = os.environ.get("BGUTIL_BASE_URL", "http://bgutil-provider:4416")
 
 URL_REGEX = re.compile(r"https?://\S+")
+TIKTOK_ID_RE = re.compile(r"(?:video|photo)/(\d{8,})")
+TIKTOK_SHORT_RE = re.compile(r"https?://(?:vm|vt)\.tiktok\.com/\S+", re.I)
 
 # --- MongoDB ---
 mongo_client = MongoClient(MONGO_URI)
@@ -115,8 +122,17 @@ def _detect_platform(url: str) -> str:
     return "generic"
 
 
+def _impersonate_available() -> bool:
+    try:
+        import curl_cffi  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 def _base_ydl_opts(tmp_dir: str) -> dict[str, Any]:
-    return {
+    opts: dict[str, Any] = {
         "outtmpl": os.path.join(tmp_dir, "%(id)s.%(ext)s"),
         "format": (
             f"bv*[filesize<{MAX_FILE_SIZE_MB}M]+ba[filesize<{MAX_FILE_SIZE_MB}M]/"
@@ -147,23 +163,20 @@ def _base_ydl_opts(tmp_dir: str) -> dict[str, Any]:
             "Accept-Language": "en-US,en;q=0.9",
         },
         "paths": {"home": tmp_dir, "temp": tmp_dir},
-        # Nunca cookies / nunca browser session
         "cookiefile": None,
         "cookiesfrombrowser": None,
     }
+    # TLS fingerprint de Chrome: clave contra TikTok status code 0
+    if _impersonate_available():
+        opts["impersonate"] = "chrome"
+    return opts
 
 
 def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
-    """
-    Cascada de estrategias SIN cookies.
-    Cada ítem: (nombre, overrides sobre _base_ydl_opts).
-    """
     platform = _detect_platform(url)
     strategies: list[tuple[str, dict[str, Any]]] = []
 
     if platform == "youtube":
-        # Clientes que NO requieren cookies de cuenta.
-        # PO Token vía bgutil-provider (companion en docker-compose).
         strategies.append(
             (
                 "yt-android+pot",
@@ -211,31 +224,73 @@ def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
                 "yt-mweb+pot",
                 {
                     "extractor_args": {
-                        "youtube": {
-                            "player_client": ["mweb", "web_safari"],
-                        },
+                        "youtube": {"player_client": ["mweb", "web_safari"]},
                         "youtubepot-bgutilhttp": {"base_url": BGUTIL_BASE_URL},
                     },
                 },
             )
         )
     elif platform == "tiktok":
+        # 1) Impersonate Chrome (curl_cffi) — lo que más arregla status code 0
         strategies.append(
             (
-                "tt-mobile",
+                "tt-impersonate-chrome",
                 {
+                    "impersonate": "chrome",
                     "http_headers": {
-                        "User-Agent": (
-                            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                            "Version/17.0 Mobile/15E148 Safari/604.1"
-                        ),
                         "Referer": "https://www.tiktok.com/",
-                        "Accept-Language": "en-US,en;q=0.9",
+                        "Origin": "https://www.tiktok.com",
                     },
+                },
+            )
+        )
+        strategies.append(
+            (
+                "tt-impersonate-safari",
+                {
+                    "impersonate": "safari",
+                    "http_headers": {
+                        "Referer": "https://www.tiktok.com/",
+                    },
+                },
+            )
+        )
+        # 2) API móvil con distintos hostnames
+        for host in (
+            "api16-normal-c-useast1a.tiktokv.com",
+            "api16-normal-c-useast2a.tiktokv.com",
+            "api19-normal-c-useast1a.tiktokv.com",
+            "api22-normal-c-useast1a.tiktokv.com",
+        ):
+            strategies.append(
+                (
+                    f"tt-api-{host.split('.')[0]}",
+                    {
+                        "impersonate": "chrome",
+                        "extractor_args": {"tiktok": {"api_hostname": host}},
+                        "http_headers": {
+                            "User-Agent": (
+                                "com.zhiliaoapp.musically/2023501030 "
+                                "(Linux; U; Android 13; en_US; Pixel 7; "
+                                "Build/TQ3A.230901.001; Cronet/58.0.2991.0)"
+                            ),
+                            "Referer": "https://www.tiktok.com/",
+                        },
+                    },
+                )
+            )
+        # 3) app_info (mobile API install profile)
+        strategies.append(
+            (
+                "tt-app-info",
+                {
+                    "impersonate": "chrome",
                     "extractor_args": {
                         "tiktok": {
-                            "api_hostname": "api16-normal-c-useast1a.tiktokv.com",
+                            "app_info": [
+                                "trill/38.4.2/2023804020/1180",
+                                "musical_ly/38.4.2/2023804020/1233",
+                            ]
                         }
                     },
                 },
@@ -243,27 +298,27 @@ def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
         )
         strategies.append(
             (
-                "tt-android-ua",
+                "tt-mobile-ua",
                 {
+                    "impersonate": "chrome",
                     "http_headers": {
                         "User-Agent": (
-                            "com.zhiliaoapp.musically/2023501030 "
-                            "(Linux; U; Android 13; en_US; Pixel 7; "
-                            "Build/TQ3A.230901.001; "
-                            "Cronet/58.0.2991.0)"
+                            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                            "Version/17.0 Mobile/15E148 Safari/604.1"
                         ),
                         "Referer": "https://www.tiktok.com/",
                     },
                 },
             )
         )
-        strategies.append(("tt-default", {}))
+        strategies.append(("tt-default", {"impersonate": "chrome"}))
     elif platform == "instagram":
-        # Público sin login: a veces funciona; privados/reels restringidos no.
         strategies.append(
             (
                 "ig-mobile",
                 {
+                    "impersonate": "chrome",
                     "http_headers": {
                         "User-Agent": (
                             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -276,12 +331,13 @@ def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
                 },
             )
         )
-        strategies.append(("ig-default", {}))
+        strategies.append(("ig-default", {"impersonate": "chrome"}))
     elif platform == "twitter":
         strategies.append(
             (
                 "x-mobile",
                 {
+                    "impersonate": "chrome",
                     "http_headers": {
                         "User-Agent": (
                             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -293,13 +349,14 @@ def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
                 },
             )
         )
-        strategies.append(("x-default", {}))
+        strategies.append(("x-default", {"impersonate": "chrome"}))
     else:
-        strategies.append(("generic-mobile", {}))
+        strategies.append(("generic-mobile", {"impersonate": "chrome"}))
         strategies.append(
             (
                 "generic-desktop",
                 {
+                    "impersonate": "chrome",
                     "http_headers": {
                         "User-Agent": (
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -322,7 +379,6 @@ def _resolve_filename(info: dict, filename: str) -> str:
         candidate = base + ext
         if os.path.exists(candidate):
             return candidate
-    # A veces yt-dlp deja el archivo con otro id; busca cualquier media en el dir
     directory = os.path.dirname(filename) or "."
     for name in os.listdir(directory):
         if name.startswith("_"):
@@ -338,7 +394,6 @@ def _download_once(url: str, ydl_opts: dict[str, Any]) -> tuple[dict, str]:
         info = ydl.extract_info(url, download=True)
         if info is None:
             raise RuntimeError("yt-dlp no devolvió metadata")
-        # playlists / entries
         if "entries" in info and info["entries"]:
             info = next(e for e in info["entries"] if e)
         filename = ydl.prepare_filename(info)
@@ -346,19 +401,137 @@ def _download_once(url: str, ydl_opts: dict[str, Any]) -> tuple[dict, str]:
         return info, filename
 
 
+def _http_json(url: str, timeout: int = 25) -> dict:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://www.tikwm.com/",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _http_download(url: str, dest: str, timeout: int = 120) -> None:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.tiktok.com/",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
+        shutil.copyfileobj(resp, out, length=1024 * 256)
+
+
+def _expand_tiktok_url(url: str) -> str:
+    """Resuelve vm/vt.tiktok.com a URL larga (sin cookies)."""
+    if not TIKTOK_SHORT_RE.match(url):
+        return url
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.geturl() or url
+    except Exception as e:
+        logger.warning("No pude expandir short TikTok %s: %s", url, e)
+        return url
+
+
+def _download_tiktok_via_tikwm(url: str, tmp_dir: str) -> tuple[dict, str]:
+    """
+    Fallback autónomo (sin cookies): API pública de tikwm.com.
+    No es sesión de usuario; es un proxy de metadata/CDN.
+    """
+    expanded = _expand_tiktok_url(url)
+    qs = urllib.parse.urlencode({"url": expanded, "hd": "1"})
+    api_url = f"https://www.tikwm.com/api/?{qs}"
+    logger.info("TikTok fallback TikWM: %s", api_url)
+    payload = _http_json(api_url)
+    if not isinstance(payload, dict):
+        raise RuntimeError("TikWM respuesta inválida")
+    if payload.get("code") not in (0, "0", None) and payload.get("code") != 0:
+        # algunos devuelven code=0 ok
+        if int(payload.get("code", -1) or -1) != 0:
+            raise RuntimeError(f"TikWM error: {payload.get('msg') or payload}")
+
+    data = payload.get("data") or {}
+    if not data:
+        raise RuntimeError(f"TikWM sin data: {payload.get('msg') or payload}")
+
+    # Preferir sin watermark / HD
+    play = (
+        data.get("hdplay")
+        or data.get("play")
+        or data.get("wmplay")
+        or (data.get("images") or [None])[0]
+    )
+    if not play or not isinstance(play, str):
+        raise RuntimeError("TikWM no devolvió URL de video")
+
+    # slideshow de fotos: no es video
+    if data.get("images") and not data.get("play") and not data.get("hdplay"):
+        raise RuntimeError("Este TikTok es un carrusel de fotos, no un video")
+
+    vid = str(data.get("id") or TIKTOK_ID_RE.search(expanded) and TIKTOK_ID_RE.search(expanded).group(1) or int(time.time()))
+    dest = os.path.join(tmp_dir, f"{vid}.mp4")
+    _http_download(play, dest)
+    if not os.path.exists(dest) or os.path.getsize(dest) < 1000:
+        raise RuntimeError("TikWM descargó un archivo vacío/inválido")
+
+    info = {
+        "id": vid,
+        "title": data.get("title") or f"tiktok_{vid}",
+        "uploader": (data.get("author") or {}).get("unique_id")
+        or (data.get("author") or {}).get("nickname")
+        or "",
+        "webpage_url": expanded,
+        "extractor": "tikwm",
+    }
+    return info, dest
+
+
+def _clean_tmp(tmp_dir: str) -> None:
+    for leftover in os.listdir(tmp_dir):
+        path = os.path.join(tmp_dir, leftover)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
-    """
-    Intenta varias estrategias sin cookies.
-    Devuelve (info, filename, strategy_name).
-    """
     errors: list[str] = []
-    strategies = _strategies_for(url)
     platform = _detect_platform(url)
-    logger.info("Plataforma=%s estrategias=%s", platform, [s[0] for s in strategies])
+    strategies = _strategies_for(url)
+    logger.info(
+        "Plataforma=%s impersonate=%s estrategias=%s",
+        platform,
+        _impersonate_available(),
+        [s[0] for s in strategies],
+    )
 
     for name, overrides in strategies:
         opts = _base_ydl_opts(tmp_dir)
-        # merge profundo simple de extractor_args / headers
         for key, value in overrides.items():
             if key == "http_headers":
                 opts["http_headers"] = {**opts.get("http_headers", {}), **value}
@@ -374,16 +547,11 @@ def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
             else:
                 opts[key] = value
 
-        # Limpia restos de intentos previos en el mismo tmp
-        for leftover in os.listdir(tmp_dir):
-            path = os.path.join(tmp_dir, leftover)
-            try:
-                if os.path.isfile(path):
-                    os.remove(path)
-                elif os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
-            except OSError:
-                pass
+        # Si no hay curl_cffi, quitar impersonate para no romper
+        if "impersonate" in opts and not _impersonate_available():
+            opts.pop("impersonate", None)
+
+        _clean_tmp(tmp_dir)
 
         try:
             logger.info("Probando estrategia: %s", name)
@@ -396,10 +564,23 @@ def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
             err = f"{name}: {e}"
             logger.warning("Falló %s", err)
             errors.append(err)
-            time.sleep(0.4)
+            time.sleep(0.35)
             continue
 
-    joined = " | ".join(errors[-4:])  # últimas causas
+    # Fallback autónomo específico TikTok (sin cookies de usuario)
+    if platform == "tiktok":
+        try:
+            _clean_tmp(tmp_dir)
+            logger.info("Probando fallback TikWM")
+            info, filename = _download_tiktok_via_tikwm(url, tmp_dir)
+            logger.info("OK con tikwm → %s", filename)
+            return info, filename, "tt-tikwm"
+        except Exception as e:
+            err = f"tt-tikwm: {e}"
+            logger.warning("Falló %s", err)
+            errors.append(err)
+
+    joined = " | ".join(errors[-5:])
     raise RuntimeError(f"Todas las estrategias fallaron. Últimos errores: {joined}")
 
 
@@ -407,6 +588,14 @@ def _friendly_download_error(exc: Exception, url: str) -> str:
     msg = str(exc) or exc.__class__.__name__
     low = msg.lower()
     platform = _detect_platform(url)
+
+    if "status code 0" in low or "video not available" in low:
+        return (
+            "❌ TikTok bloqueó la extracción directa (status code 0 = anti-bot).\n"
+            "El bot ya reintenta con TLS impersonate + API móvil + TikWM.\n"
+            "Si sigue fallando: IP del VPS marcada, o video regional/privado.\n"
+            f"Detalle: {msg}"
+        )
 
     if any(
         k in low
@@ -424,17 +613,10 @@ def _friendly_download_error(exc: Exception, url: str) -> str:
         extra = {
             "youtube": (
                 "YouTube bloqueó la IP del VPS o el video es restringido. "
-                "El bot ya reintenta con android/ios/tv + PO Token; "
-                "si sigue fallando, suele ser rate-limit temporal o video age-restricted."
+                "El bot reintenta android/ios/tv + PO Token."
             ),
-            "tiktok": (
-                "TikTok a veces bloquea IPs de datacenter en videos regionales. "
-                "Prueba otro enlace público; no se usan cookies."
-            ),
-            "instagram": (
-                "Instagram suele exigir login para muchos reels/posts. "
-                "Este bot es autónomo (sin sesión): solo posts públicos abiertos."
-            ),
+            "tiktok": "TikTok rechazó la descarga anónima (IP VPS o video no público).",
+            "instagram": "Instagram suele exigir login para muchos reels. Solo posts públicos abiertos.",
         }.get(platform, "El sitio rechazó la descarga anónima.")
         return f"❌ No se pudo descargar (sin cookies/sesión).\n{extra}\n\nDetalle: {msg}"
 
@@ -443,7 +625,7 @@ def _friendly_download_error(exc: Exception, url: str) -> str:
 
     if "todas las estrategias fallaron" in low:
         return (
-            "❌ No pude bajar el video con ninguna estrategia autónoma "
+            f"❌ No pude bajar el video con ninguna estrategia autónoma "
             f"(plataforma: {platform}).\n\n{msg}"
         )
 
@@ -459,10 +641,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if chat_id == ADMIN_CHAT_ID:
         await asyncio.to_thread(_ensure_admin_approved)
+        imp = "sí" if _impersonate_available() else "NO (instala curl_cffi)"
         await update.message.reply_text(
             "👑 Admin listo.\n"
             "Modo: autónomo (sin cookies / sin sesiones).\n"
-            "YouTube usa clientes android/ios/tv + PO Token (bgutil).\n"
+            f"TLS impersonate: {imp}\n"
+            "TikTok: yt-dlp + TikWM fallback.\n"
+            "YouTube: android/ios/tv + PO Token.\n"
             "Mándame un enlace o espera solicitudes de acceso."
         )
         return
@@ -609,6 +794,7 @@ def main() -> None:
 
     logger.info("Modo AUTÓNOMO: sin cookies / sin sesiones de navegador")
     logger.info("PO Token provider: %s", BGUTIL_BASE_URL)
+    logger.info("TLS impersonate (curl_cffi): %s", _impersonate_available())
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
