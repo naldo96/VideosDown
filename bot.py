@@ -122,6 +122,21 @@ def _detect_platform(url: str) -> str:
     return "generic"
 
 
+# Targets REALES de yt-dlp/curl_cffi (NO existen "chrome" ni "safari" genéricos).
+# Ver: yt-dlp --list-impersonate-targets
+_IMPERSONATE_PREF = (
+    "chrome131",
+    "chrome131_android",
+    "chrome124",
+    "chrome120",
+    "chrome116",
+    "chrome110",
+    "safari17_2_ios",
+    "safari17_0",
+    "edge101",
+)
+
+
 def _impersonate_available() -> bool:
     try:
         import curl_cffi  # noqa: F401
@@ -129,6 +144,28 @@ def _impersonate_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _pick_impersonate_target() -> str | None:
+    """Elige un target válido instalado; None si no hay curl_cffi/targets."""
+    if not _impersonate_available():
+        return None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+
+        # Preferidos conocidos
+        for name in _IMPERSONATE_PREF:
+            try:
+                # yt-dlp acepta string "chrome131" o ImpersonateTarget
+                return name
+            except Exception:
+                continue
+        return "chrome131"
+    except Exception:
+        return "chrome131"
+
+
+_DEFAULT_IMPERSONATE = _pick_impersonate_target()
 
 
 def _base_ydl_opts(tmp_dir: str) -> dict[str, Any]:
@@ -166,9 +203,9 @@ def _base_ydl_opts(tmp_dir: str) -> dict[str, Any]:
         "cookiefile": None,
         "cookiesfrombrowser": None,
     }
-    # TLS fingerprint de Chrome: clave contra TikTok status code 0
-    if _impersonate_available():
-        opts["impersonate"] = "chrome"
+    # Solo si hay target válido. Nunca "chrome"/"safari" genéricos.
+    if _DEFAULT_IMPERSONATE:
+        opts["impersonate"] = _DEFAULT_IMPERSONATE
     return opts
 
 
@@ -231,132 +268,134 @@ def _strategies_for(url: str) -> list[tuple[str, dict[str, Any]]]:
             )
         )
     elif platform == "tiktok":
-        # 1) Impersonate Chrome (curl_cffi) — lo que más arregla status code 0
-        strategies.append(
-            (
-                "tt-impersonate-chrome",
-                {
-                    "impersonate": "chrome",
-                    "http_headers": {
-                        "Referer": "https://www.tiktok.com/",
-                        "Origin": "https://www.tiktok.com",
+        # Targets versionados reales (chrome/safari genéricos NO existen en yt-dlp).
+        imp = _DEFAULT_IMPERSONATE  # p.ej. chrome131
+        imp_android = "chrome131_android" if _DEFAULT_IMPERSONATE else None
+        imp_ios = "safari17_2_ios" if _DEFAULT_IMPERSONATE else None
+
+        if imp:
+            strategies.append(
+                (
+                    f"tt-impersonate-{imp}",
+                    {
+                        "impersonate": imp,
+                        "http_headers": {
+                            "Referer": "https://www.tiktok.com/",
+                            "Origin": "https://www.tiktok.com",
+                        },
                     },
-                },
+                )
             )
-        )
-        strategies.append(
-            (
-                "tt-impersonate-safari",
-                {
-                    "impersonate": "safari",
-                    "http_headers": {
-                        "Referer": "https://www.tiktok.com/",
+        if imp_android:
+            strategies.append(
+                (
+                    "tt-impersonate-android",
+                    {
+                        "impersonate": imp_android,
+                        "http_headers": {"Referer": "https://www.tiktok.com/"},
                     },
-                },
+                )
             )
-        )
-        # 2) API móvil con distintos hostnames
+        if imp_ios:
+            strategies.append(
+                (
+                    "tt-impersonate-ios",
+                    {
+                        "impersonate": imp_ios,
+                        "http_headers": {"Referer": "https://www.tiktok.com/"},
+                    },
+                )
+            )
+
+        # API móvil con distintos hostnames
         for host in (
             "api16-normal-c-useast1a.tiktokv.com",
             "api16-normal-c-useast2a.tiktokv.com",
             "api19-normal-c-useast1a.tiktokv.com",
             "api22-normal-c-useast1a.tiktokv.com",
         ):
-            strategies.append(
-                (
-                    f"tt-api-{host.split('.')[0]}",
-                    {
-                        "impersonate": "chrome",
-                        "extractor_args": {"tiktok": {"api_hostname": host}},
-                        "http_headers": {
-                            "User-Agent": (
-                                "com.zhiliaoapp.musically/2023501030 "
-                                "(Linux; U; Android 13; en_US; Pixel 7; "
-                                "Build/TQ3A.230901.001; Cronet/58.0.2991.0)"
-                            ),
-                            "Referer": "https://www.tiktok.com/",
-                        },
-                    },
-                )
-            )
-        # 3) app_info (mobile API install profile)
-        strategies.append(
-            (
-                "tt-app-info",
-                {
-                    "impersonate": "chrome",
-                    "extractor_args": {
-                        "tiktok": {
-                            "app_info": [
-                                "trill/38.4.2/2023804020/1180",
-                                "musical_ly/38.4.2/2023804020/1233",
-                            ]
-                        }
-                    },
+            ov: dict[str, Any] = {
+                "extractor_args": {"tiktok": {"api_hostname": host}},
+                "http_headers": {
+                    "User-Agent": (
+                        "com.zhiliaoapp.musically/2023501030 "
+                        "(Linux; U; Android 13; en_US; Pixel 7; "
+                        "Build/TQ3A.230901.001; Cronet/58.0.2991.0)"
+                    ),
+                    "Referer": "https://www.tiktok.com/",
                 },
-            )
-        )
-        strategies.append(
-            (
-                "tt-mobile-ua",
-                {
-                    "impersonate": "chrome",
-                    "http_headers": {
-                        "User-Agent": (
-                            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                            "Version/17.0 Mobile/15E148 Safari/604.1"
-                        ),
-                        "Referer": "https://www.tiktok.com/",
-                    },
-                },
-            )
-        )
-        strategies.append(("tt-default", {"impersonate": "chrome"}))
+            }
+            if imp_android or imp:
+                ov["impersonate"] = imp_android or imp
+            strategies.append((f"tt-api-{host.split('.')[0]}", ov))
+
+        app_ov: dict[str, Any] = {
+            "extractor_args": {
+                "tiktok": {
+                    "app_info": [
+                        "trill/38.4.2/2023804020/1180",
+                        "musical_ly/38.4.2/2023804020/1233",
+                    ]
+                }
+            },
+        }
+        if imp:
+            app_ov["impersonate"] = imp
+        strategies.append(("tt-app-info", app_ov))
+
+        mobile_ov: dict[str, Any] = {
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/17.0 Mobile/15E148 Safari/604.1"
+                ),
+                "Referer": "https://www.tiktok.com/",
+            },
+        }
+        if imp_ios or imp:
+            mobile_ov["impersonate"] = imp_ios or imp
+        strategies.append(("tt-mobile-ua", mobile_ov))
+
+        # Último: sin impersonate forzado (por si el target falla)
+        strategies.append(("tt-no-impersonate", {"impersonate": None}))
     elif platform == "instagram":
-        strategies.append(
-            (
-                "ig-mobile",
-                {
-                    "impersonate": "chrome",
-                    "http_headers": {
-                        "User-Agent": (
-                            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                            "Version/17.0 Mobile/15E148 Safari/604.1"
-                        ),
-                        "Referer": "https://www.instagram.com/",
-                        "X-IG-App-ID": "936619743392459",
-                    },
-                },
-            )
-        )
-        strategies.append(("ig-default", {"impersonate": "chrome"}))
+        ig_ov: dict[str, Any] = {
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/17.0 Mobile/15E148 Safari/604.1"
+                ),
+                "Referer": "https://www.instagram.com/",
+                "X-IG-App-ID": "936619743392459",
+            },
+        }
+        if _DEFAULT_IMPERSONATE:
+            ig_ov["impersonate"] = _DEFAULT_IMPERSONATE
+        strategies.append(("ig-mobile", ig_ov))
+        strategies.append(("ig-default", {}))
     elif platform == "twitter":
-        strategies.append(
-            (
-                "x-mobile",
-                {
-                    "impersonate": "chrome",
-                    "http_headers": {
-                        "User-Agent": (
-                            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                            "Version/17.0 Mobile/15E148 Safari/604.1"
-                        ),
-                        "Referer": "https://x.com/",
-                    },
-                },
-            )
-        )
-        strategies.append(("x-default", {"impersonate": "chrome"}))
+        x_ov: dict[str, Any] = {
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Version/17.0 Mobile/15E148 Safari/604.1"
+                ),
+                "Referer": "https://x.com/",
+            },
+        }
+        if _DEFAULT_IMPERSONATE:
+            x_ov["impersonate"] = _DEFAULT_IMPERSONATE
+        strategies.append(("x-mobile", x_ov))
+        strategies.append(("x-default", {}))
     else:
-        strategies.append(("generic-mobile", {"impersonate": "chrome"}))
+        strategies.append(("generic-mobile", {}))
         strategies.append(
             (
                 "generic-desktop",
                 {
-                    "impersonate": "chrome",
                     "http_headers": {
                         "User-Agent": (
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -524,11 +563,25 @@ def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
     platform = _detect_platform(url)
     strategies = _strategies_for(url)
     logger.info(
-        "Plataforma=%s impersonate=%s estrategias=%s",
+        "Plataforma=%s impersonate_target=%s estrategias=%s",
         platform,
-        _impersonate_available(),
+        _DEFAULT_IMPERSONATE,
         [s[0] for s in strategies],
     )
+
+    # TikTok: TikWM primero (en VPS es lo más fiable sin cookies).
+    # Si falla, cae a yt-dlp con impersonate versionado.
+    if platform == "tiktok":
+        try:
+            _clean_tmp(tmp_dir)
+            logger.info("Probando TikWM (preferido en VPS)")
+            info, filename = _download_tiktok_via_tikwm(url, tmp_dir)
+            logger.info("OK con tikwm → %s", filename)
+            return info, filename, "tt-tikwm"
+        except Exception as e:
+            err = f"tt-tikwm: {e}"
+            logger.warning("Falló %s", err)
+            errors.append(err)
 
     for name, overrides in strategies:
         opts = _base_ydl_opts(tmp_dir)
@@ -544,11 +597,16 @@ def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
                     else:
                         merged[ek] = ev
                 opts["extractor_args"] = merged
+            elif key == "impersonate":
+                if value is None:
+                    opts.pop("impersonate", None)
+                else:
+                    opts["impersonate"] = value
             else:
                 opts[key] = value
 
         # Si no hay curl_cffi, quitar impersonate para no romper
-        if "impersonate" in opts and not _impersonate_available():
+        if opts.get("impersonate") and not _impersonate_available():
             opts.pop("impersonate", None)
 
         _clean_tmp(tmp_dir)
@@ -564,21 +622,8 @@ def download_video(url: str, tmp_dir: str) -> tuple[dict, str, str]:
             err = f"{name}: {e}"
             logger.warning("Falló %s", err)
             errors.append(err)
-            time.sleep(0.35)
+            time.sleep(0.25)
             continue
-
-    # Fallback autónomo específico TikTok (sin cookies de usuario)
-    if platform == "tiktok":
-        try:
-            _clean_tmp(tmp_dir)
-            logger.info("Probando fallback TikWM")
-            info, filename = _download_tiktok_via_tikwm(url, tmp_dir)
-            logger.info("OK con tikwm → %s", filename)
-            return info, filename, "tt-tikwm"
-        except Exception as e:
-            err = f"tt-tikwm: {e}"
-            logger.warning("Falló %s", err)
-            errors.append(err)
 
     joined = " | ".join(errors[-5:])
     raise RuntimeError(f"Todas las estrategias fallaron. Últimos errores: {joined}")
@@ -641,12 +686,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if chat_id == ADMIN_CHAT_ID:
         await asyncio.to_thread(_ensure_admin_approved)
-        imp = "sí" if _impersonate_available() else "NO (instala curl_cffi)"
+        imp = _DEFAULT_IMPERSONATE or ("NO" if not _impersonate_available() else "sin target")
         await update.message.reply_text(
             "👑 Admin listo.\n"
             "Modo: autónomo (sin cookies / sin sesiones).\n"
             f"TLS impersonate: {imp}\n"
-            "TikTok: yt-dlp + TikWM fallback.\n"
+            "TikTok: TikWM primero + yt-dlp.\n"
             "YouTube: android/ios/tv + PO Token.\n"
             "Mándame un enlace o espera solicitudes de acceso."
         )
@@ -794,7 +839,11 @@ def main() -> None:
 
     logger.info("Modo AUTÓNOMO: sin cookies / sin sesiones de navegador")
     logger.info("PO Token provider: %s", BGUTIL_BASE_URL)
-    logger.info("TLS impersonate (curl_cffi): %s", _impersonate_available())
+    logger.info(
+        "TLS impersonate: available=%s target=%s",
+        _impersonate_available(),
+        _DEFAULT_IMPERSONATE,
+    )
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
