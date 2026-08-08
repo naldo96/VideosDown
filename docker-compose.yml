@@ -1,31 +1,11 @@
 services:
-  bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:latest
-    container_name: bgutil-provider
-    restart: unless-stopped
-    # Solo red interna. Genera PO Tokens para YouTube (sin cookies).
-    expose:
-      - "4416"
-    networks:
-      - botnet
-
   bot:
     build: .
     container_name: telegram-video-bot
     restart: unless-stopped
-    depends_on:
-      - bgutil-provider
-    environment:
-      - BGUTIL_BASE_URL=http://bgutil-provider:4416
     volumes:
-      # Descargas en RAM: nada queda en el disco del VPS
+      # Descargas en RAM: nada queda en disco del VPS
       - type: tmpfs
         target: /tmp
         tmpfs:
           size: 512m
-    networks:
-      - botnet
-
-networks:
-  botnet:
-    driver: bridge
